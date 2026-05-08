@@ -1,3 +1,5 @@
+import crypto from "crypto";
+
 interface GenerateParams {
   length: number;
   minUpper: number;
@@ -18,18 +20,40 @@ const CHARSETS = {
 };
 
 /**
- * Creates a deterministic random number generator from a seed
+ * Creates a cryptographically-secure deterministic random byte generator from
+ * a 32-byte hex-encoded seed.
+ *
+ * The seed is used as an AES-256 key; an AES-256-CTR keystream (zero IV,
+ * deterministic for a given seed) is used to expand the seed into as many
+ * random bytes as callers need.  This replaces the previous implementation
+ * which cycled through the raw seed bytes sequentially — a non-expansion that
+ * exposed the seed material directly and introduced severe modulo bias.
  */
 function createRandomGenerator(seed: string) {
-  const seedBytes = new Uint8Array(Buffer.from(seed, "hex"));
-  let position = 0;
+  // Ensure the seed is exactly 32 bytes (64 hex chars); pad or truncate safely.
+  const keyHex = seed.padEnd(64, "0").slice(0, 64);
+  const key = Buffer.from(keyHex, "hex");
+  // Fixed zero IV is safe here because each seed is unique per CTRNG request.
+  const iv = Buffer.alloc(16, 0);
+  const cipher = crypto.createCipheriv("aes-256-ctr", key, iv);
+
+  let pool = Buffer.alloc(0);
+  let poolOffset = 0;
+
+  function ensurePool(need: number): void {
+    const available = pool.length - poolOffset;
+    if (available < need) {
+      // Encrypt 1024 zero bytes to extend the keystream pool.
+      const chunk = cipher.update(Buffer.alloc(1024, 0));
+      pool = Buffer.concat([pool.slice(poolOffset), chunk]);
+      poolOffset = 0;
+    }
+  }
 
   return (length: number): Uint8Array => {
-    const result = new Uint8Array(length);
-    for (let i = 0; i < length; i++) {
-      result[i] = seedBytes[position % seedBytes.length];
-      position++;
-    }
+    ensurePool(length);
+    const result = new Uint8Array(pool.slice(poolOffset, poolOffset + length));
+    poolOffset += length;
     return result;
   };
 }
@@ -100,41 +124,47 @@ export function generatePasswordFromSeed(
     throw new Error("Minimum requirements exceed password length");
   }
 
+  /**
+   * Unbiased index selection using rejection sampling.
+   * The original `randomByte % charsetLen` produced modulo bias when 256 is
+   * not a multiple of charsetLen.  This draws fresh bytes until the value
+   * falls within a range that divides evenly.
+   */
+  function unbiasedIndex(charsetLen: number): number {
+    const limit = 256 - (256 % charsetLen);
+    while (true) {
+      const byte = randomValues(1)[0];
+      if (byte < limit) return byte % charsetLen;
+    }
+  }
+
   let password = "";
   const remainingLength = length - totalMin;
 
   // Add minimum required characters
   for (let i = 0; i < minUpper; i++) {
-    const randomIndex = randomValues(1)[0] % availableCharsets.uppercase.length;
-    password += availableCharsets.uppercase[randomIndex];
+    password += availableCharsets.uppercase[unbiasedIndex(availableCharsets.uppercase.length)];
   }
-
   for (let i = 0; i < minLower; i++) {
-    const randomIndex = randomValues(1)[0] % availableCharsets.lowercase.length;
-    password += availableCharsets.lowercase[randomIndex];
+    password += availableCharsets.lowercase[unbiasedIndex(availableCharsets.lowercase.length)];
   }
-
   for (let i = 0; i < minNumbers; i++) {
-    const randomIndex = randomValues(1)[0] % availableCharsets.numbers.length;
-    password += availableCharsets.numbers[randomIndex];
+    password += availableCharsets.numbers[unbiasedIndex(availableCharsets.numbers.length)];
   }
-
   for (let i = 0; i < minSymbols; i++) {
-    const randomIndex = randomValues(1)[0] % availableCharsets.symbols.length;
-    password += availableCharsets.symbols[randomIndex];
+    password += availableCharsets.symbols[unbiasedIndex(availableCharsets.symbols.length)];
   }
 
   // Fill remaining length with random characters from all available sets
   const allAvailableChars = Object.values(availableCharsets).join("");
   for (let i = 0; i < remainingLength; i++) {
-    const randomIndex = randomValues(1)[0] % allAvailableChars.length;
-    password += allAvailableChars[randomIndex];
+    password += allAvailableChars[unbiasedIndex(allAvailableChars.length)];
   }
 
-  // Shuffle the password
+  // Fisher-Yates shuffle using unbiased index selection
   const passwordArray = password.split("");
   for (let i = passwordArray.length - 1; i > 0; i--) {
-    const j = randomValues(1)[0] % (i + 1);
+    const j = unbiasedIndex(i + 1);
     [passwordArray[i], passwordArray[j]] = [passwordArray[j], passwordArray[i]];
   }
 
