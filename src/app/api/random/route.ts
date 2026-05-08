@@ -8,14 +8,17 @@ export async function GET(req: NextRequest) {
   let usedFallback = false;
   let data: OrbitportSeedResponse | null = null;
 
+  // cookieRes is a mutable carrier for Set-Cookie headers set by getValidToken.
+  // Its cookies are forwarded onto the final JSON response below so they are
+  // actually sent to the browser.  The original code discarded this object,
+  // causing a new OAuth token to be fetched on every single request.
+  const cookieRes = new NextResponse();
+
   try {
     if (!ORBITPORT_API_URL) throw new Error("Missing Orbitport API URL");
 
-    // Create a response object for cookie setting
-    const res = NextResponse.next();
-
-    // Get valid token using our auth utility
-    const accessToken = await getValidToken(req, res);
+    // Get valid token — any new token's Set-Cookie header is written to cookieRes
+    const accessToken = await getValidToken(req, cookieRes);
     if (!accessToken) {
       return NextResponse.json(
         { message: "Authentication failed" },
@@ -43,9 +46,16 @@ export async function GET(req: NextRequest) {
     data = null;
   }
 
-  // Always add usedFallback to the response
-  return NextResponse.json({
+  const jsonRes = NextResponse.json({
     ...data,
     usedFallback,
   });
+
+  // Forward any Set-Cookie headers from cookieRes onto the response that is
+  // actually returned to the client.
+  for (const cookie of cookieRes.headers.getSetCookie()) {
+    jsonRes.headers.append("Set-Cookie", cookie);
+  }
+
+  return jsonRes;
 }
