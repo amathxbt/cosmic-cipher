@@ -1,12 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
-import * as cookie from "cookie";
 
-const AUTH_SECRET = (
-  process.env.AUTH_SECRET || "dev_secret_32_bytes_long_for_demo"
-)
-  .padEnd(32, "!")
-  .slice(0, 32);
+// AUTH_SECRET must be set to a secret string in production.
+// We derive a 32-byte AES-256 key from it using SHA-256 so that keys of any
+// length produce a full-entropy 256-bit key — avoiding the original .padEnd(32,'!')
+// which filled short secrets with predictable '!' bytes.
+if (!process.env.AUTH_SECRET) {
+  throw new Error(
+    "AUTH_SECRET environment variable is required but not set. " +
+    "Set it to a long, randomly-generated secret string before starting the server."
+  );
+}
+const AUTH_KEY: Buffer = crypto
+  .createHash("sha256")
+  .update(process.env.AUTH_SECRET)
+  .digest();
+
 const COOKIE_NAME = "orbitport_token";
 const TOKEN_EXPIRE_BUFFER = 60; // Refresh token if expiring within this buffer
 
@@ -23,11 +32,7 @@ interface TokenData {
  */
 function encrypt(text: string): string {
   const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv(
-    "aes-256-gcm",
-    Buffer.from(AUTH_SECRET),
-    iv
-  );
+  const cipher = crypto.createCipheriv("aes-256-gcm", AUTH_KEY, iv);
   let encrypted = cipher.update(text, "utf8", "base64");
   encrypted += cipher.final("base64");
   const tag = cipher.getAuthTag();
@@ -47,11 +52,7 @@ function decrypt(data: string | undefined): string | null {
     if (!ivB64 || !tagB64 || !encrypted) return null;
     const iv = Buffer.from(ivB64, "base64");
     const tag = Buffer.from(tagB64, "base64");
-    const decipher = crypto.createDecipheriv(
-      "aes-256-gcm",
-      Buffer.from(AUTH_SECRET),
-      iv
-    );
+    const decipher = crypto.createDecipheriv("aes-256-gcm", AUTH_KEY, iv);
     decipher.setAuthTag(tag);
     let decrypted = decipher.update(encrypted, "base64", "utf8");
     decrypted += decipher.final("utf8");
